@@ -103,10 +103,11 @@ LAYOUTS = {
     'Pocket Pyramid': pocket_pyramid, 'Pocket Bridge': pocket_bridge,
 }
 
-FACES=['1B','2B','3B','4B','5B','6B','7B','8B','9B',
-       '1D','2D','3D','4D','5D','6D','7D','8D','9D',
-       '1C','2C','3C','4C','5C','6C','7C','8C','9C',
-       'E','S','W','N','R','G','Wh','Fl','Se']
+FACES=['1B','1C','1D','2B','2C','2D','3B','3C',
+    '3D','4B','4C','4D','5B','5C','5D','6B',
+    '6C','6D','7B','7C','7D','8B','8C','8D',
+    '9B','9C','9D','Au','Bm','Ch','E','G','N',
+    'Or','Pl','R','S','Sp','Su','W','Wh','Wi']
 
 
 def overlap(a,b):
@@ -162,13 +163,16 @@ class TileButton(Button):
         self.face=face
         self.depth=depth
         tile_file=Path(__file__).resolve().parent / 'assets' / 'tiles' / f'{face}.png'
-        if tile_file.is_file():
+        self.has_artwork = tile_file.is_file()
+        if self.has_artwork:
             self.text=''
             self.tile_image=KivyImage(source=str(tile_file),fit_mode='contain',size_hint=(None,None))
             self.add_widget(self.tile_image)
         self.selected=False
         self.available=True
         with self.canvas.before:
+            # Artwork PNGs contain their own complete tile body and shadow.
+            # Legacy fallback geometry is transparent whenever artwork exists.
             # Shadow is behind the tile; it grows slightly with stack height.
             self.shadow_color=Color(0.015, 0.025, 0.035, 0.40 if depth else 0.24)
             self.shadow=RoundedRectangle(radius=[dp(6)])
@@ -181,23 +185,32 @@ class TileButton(Button):
             self.stroke=Line(rounded_rectangle=(0,0,1,1,dp(5)),width=1)
         # Draw selection tint above the artwork (20% opaque blue).
         with self.canvas.after:
+            self.blocked_color = Color(0.08, 0.10, 0.10, 0)
+            self.blocked_rect = RoundedRectangle(radius=[dp(5)])
             self.highlight_color = Color(0.10, 0.45, 1.0, 0)
             self.highlight_rect = RoundedRectangle(radius=[dp(5)])
         self.bind(pos=self.redraw,size=self.redraw)
         self.redraw()
 
     def redraw(self,*_):
-        self.fill.rgba=(0.94,0.89,0.75,1) if self.available else (0.57,0.57,0.53,1)
+        self.fill.rgba = ((0, 0, 0, 0) if self.has_artwork else
+                          ((0.94,0.89,0.75,1) if self.available else (0.57,0.57,0.53,1)))
+        self.shadow_color.rgba = (0, 0, 0, 0) if self.has_artwork else (0.015, 0.025, 0.035, 0.40 if self.depth else 0.24)
+        self.edge_color.rgba = (0, 0, 0, 0) if self.has_artwork else (0.48, 0.43, 0.34, 1)
+        self.stroke_color.rgba = (0, 0, 0, 0) if self.has_artwork else (0.35, 0.30, 0.23, 1)
         if hasattr(self,'tile_image'):
             self.tile_image.pos=self.pos
             # Maintain the source aspect ratio, including in the storage tray.
             texture = self.tile_image.texture
-            ratio = (texture.width / texture.height) if texture and texture.height else 256 / 346
+            ratio = (texture.width / texture.height) if texture and texture.height else 256 / 336
             width = min(self.width, self.height * ratio)
             height = width / ratio
             self.tile_image.size = (width, height)
             self.tile_image.pos = (self.center_x-width/2, self.center_y-height/2)
-            self.tile_image.opacity=1 if self.available else 0.70
+            self.tile_image.opacity=1  # Never fade the PNG: overlapping tiles must remain opaque
+        self.blocked_color.rgba=(0.08, 0.10, 0.10, 0.25) if not self.available else (0, 0, 0, 0)
+        self.blocked_rect.pos=self.pos
+        self.blocked_rect.size=self.size
         self.highlight_color.rgba=(0.10, 0.45, 1.0, 0.20) if self.selected else (0.10, 0.45, 1.0, 0)
         self.highlight_rect.pos=self.pos
         self.highlight_rect.size=self.size
@@ -237,18 +250,33 @@ class Board(Widget):
         geometry = LAYOUTS[self.game.layout_name]()
         minx = min(p.x for p in geometry); miny = min(p.y for p in geometry)
         maxx = max(p.x + 2 for p in geometry); maxy = max(p.y + 2 for p in geometry)
-        depth_shift = dp(4) * max(p.z for p in geometry)
-        tw = min((self.width - dp(12) - depth_shift) / (maxx-minx+1) * 2,
-                 (self.height - dp(12)) / (maxy-miny+1) * 2)
-        tw = min(tw, (self.height - dp(12) - depth_shift) / (maxy-miny+1) * 2 / 1.23)
+        # PNG tile art is 256 x 336 (width x height). Fit the FULL PNG,
+        # including its baked-in left/bottom 3D edge, in each grid cell.
+        # No second Kivy tile background or additional image padding is needed.
+        aspect_height = 336 / 256
+        columns = (maxx - minx) / 2
+        rows = (maxy - miny) / 2
+        max_depth = max(p.z for p in geometry)
+        layer_offset = dp(5)
+        depth_shift = layer_offset * max_depth
+        margin = dp(6)
+        tw = min((self.width - 2 * margin - depth_shift) / columns,
+                 (self.height - 2 * margin - depth_shift) / (rows * aspect_height))
         tw = max(dp(3), tw)
-        th = tw * 1.23
-        origin_x = self.x + (self.width - (maxx-minx)*tw/2 - depth_shift)/2
-        origin_y = self.y + (self.height - (maxy-miny)*th/2 - depth_shift)/2
+        th = tw * aspect_height
+        # A tiny gutter prevents texture edges from bleeding into neighbors.
+        # Change to dp(0) if you want the tile canvases to touch exactly.
+        gutter = dp(0.5)
+        tile_w = max(dp(2), tw - gutter)
+        tile_h = tile_w * aspect_height
+        total_w = columns * tw + depth_shift
+        total_h = rows * th + depth_shift
+        origin_x = self.x + (self.width - total_w) / 2
+        origin_y = self.y + (self.height - total_h) / 2
         for p, btn in self.buttons.items():
-            btn.size = (tw-dp(2), th-dp(2))
-            btn.pos = (origin_x+(p.x-minx)*tw/2+p.z*dp(5),
-                       origin_y+(p.y-miny)*th/2+p.z*dp(5))
+            btn.size = (tile_w, tile_h)
+            btn.pos = (origin_x + (p.x - minx) * tw / 2 + p.z * layer_offset,
+                       origin_y + (p.y - miny) * th / 2 + p.z * layer_offset)
         self.update_states()
 
     def update_states(self):
