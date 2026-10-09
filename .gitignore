@@ -1,0 +1,12 @@
+.buildozer/
+bin/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.jks
+*.keystore
+*.pem
+*.key
+.env
+.env.*
